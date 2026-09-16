@@ -1,0 +1,25 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  # Variables de entorno
+  ACR_NAME: 'acrdevopsgrupo08' # Nombre del ACR del grupo 08
+  IMAGE_NAME: 'myapp-nginx-s4' # Nombre de la imagen
+  SERVICE_CONNECTION_NAME: 'acr-grupo-08' # Service Connection tipo Docker Registry -> Azure Container Registry
+
+jobs:
+  - job: BuildAndPush
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - task: Docker@2
+        inputs:
+          command: 'buildAndPush'
+          containerRegistry: '$(SERVICE_CONNECTION_NAME)'
+          repository: '$(IMAGE_NAME)'
+          dockerfile: '**/Dockerfile'
+          tags: |
+            latest
+        displayName: 'Build and Push Docker Image'
