@@ -7,9 +7,9 @@ pool:
 
 variables:
   azureSubscription: 'azure-grupo-08'     # service connection ARM hacia Azure for Students
-  # Region permitida por la suscripcion. West US 3 ya tiene 3 IP publicas (VM de desarrollo y AKS)
-  # y la suscripcion no deja crear una cuarta en esa region, por eso produccion va en North Central US.
-  location: 'northcentralus'
+  # East US 2, la region que pide la guia. West US 3 ya tiene 3 IP publicas (VM de desarrollo y AKS)
+  # y la suscripcion no deja crear una cuarta ahi. North Central US la bloquea la politica de regiones.
+  location: 'eastus2'
   resourceGroupName: 'rg-devops-grupo-08-prod'
   virtualNetworkName: 'vnet-prod-g08'
   subnetName: 'snet-prod-g08'
