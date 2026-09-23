@@ -1,0 +1,66 @@
+# Paso 1 (Semana 7): crea la maquina virtual del entorno de produccion con Azure CLI.
+# Se ejecuta a mano cuando hace falta levantar la infraestructura, no con cada commit.
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: 'azure-grupo-08'     # service connection ARM hacia Azure for Students
+  location: 'westus3'                     # region permitida por la suscripcion (East US 2 no lo esta)
+  resourceGroupName: 'rg-devops-grupo-08-prod'
+  virtualNetworkName: 'vnet-prod-g08'
+  subnetName: 'snet-prod-g08'
+  addressPrefix: '10.1.0.0/16'
+  subnetPrefix: '10.1.1.0/24'
+  securityGroupName: 'nsg-prod-g08'
+  publicIpName: 'pip-prod-g08'
+  vmName: 'vm-prod-g08'
+  vmSize: 'Standard_B1s'                  # tamano exigido por la suscripcion del curso
+  adminUsername: 'azureuser'
+  imageUrn: 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest'
+  # SSH_PUBLIC_KEY se define como variable del pipeline en Azure DevOps.
+  # La VM solo acepta llave SSH, sin contrasena.
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Crear red, NSG y maquina virtual de produccion'
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      set -e
+
+      echo "Creando grupo de recursos $(resourceGroupName) en $(location)..."
+      az group create --name $(resourceGroupName) --location $(location) --tags curso=ISY2201 grupo=08 entorno=produccion -o none
+
+      echo "Creando red virtual y subred..."
+      az network vnet create --resource-group $(resourceGroupName) --name $(virtualNetworkName) \
+        --address-prefix $(addressPrefix) --subnet-name $(subnetName) --subnet-prefix $(subnetPrefix) -o none
+
+      echo "Creando grupo de seguridad de red..."
+      az network nsg create --resource-group $(resourceGroupName) --name $(securityGroupName) -o none
+      az network nsg rule create --resource-group $(resourceGroupName) --nsg-name $(securityGroupName) \
+        --name AllowSSH --protocol Tcp --direction Inbound --priority 1000 --destination-port-ranges 22 --access Allow -o none
+      az network nsg rule create --resource-group $(resourceGroupName) --nsg-name $(securityGroupName) \
+        --name AllowHTTP --protocol Tcp --direction Inbound --priority 1001 --destination-port-ranges 80 --access Allow -o none
+
+      echo "Creando IP publica estatica..."
+      az network public-ip create --resource-group $(resourceGroupName) --name $(publicIpName) \
+        --sku Standard --allocation-method Static -o none
+
+      echo "Creando maquina virtual $(vmName)..."
+      az vm create --resource-group $(resourceGroupName) --name $(vmName) \
+        --image $(imageUrn) --size $(vmSize) \
+        --admin-username $(adminUsername) --authentication-type ssh --ssh-key-values "$(SSH_PUBLIC_KEY)" \
+        --vnet-name $(virtualNetworkName) --subnet $(subnetName) \
+        --nsg $(securityGroupName) --public-ip-address $(publicIpName) \
+        --tags curso=ISY2201 grupo=08 entorno=produccion -o table
+
+      echo "Programando apagado automatico diario (03:00 UTC) para cuidar los creditos..."
+      az vm auto-shutdown --resource-group $(resourceGroupName) --name $(vmName) --time 0300 -o none
+
+      IP=$(az network public-ip show --resource-group $(resourceGroupName) --name $(publicIpName) --query ipAddress -o tsv)
+      echo "Maquina virtual lista. IP publica: $IP"
+      echo "##vso[task.setvariable variable=ipProduccion]$IP"

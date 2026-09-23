@@ -1,11 +1,19 @@
-# Usa una imagen base oficial de Nginx
-FROM nginx:latest
+# Imagen base oficial de Nginx
+FROM nginx:1.27
 
-# Copia el archivo de configuración de Nginx al contenedor
-COPY default.conf /etc/nginx/conf.d/default.conf
+# Version de la aplicacion. La entrega el pipeline de CI al construir la imagen
+ARG APP_VERSION=local
+ENV APP_VERSION=${APP_VERSION}
 
-# Copia el contenido de la aplicación (por ejemplo, archivos HTML) al directorio donde Nginx los servirá
+# Entorno por defecto. El pipeline de CD lo cambia al levantar el contenedor
+# (desarrollo o produccion) con -e APP_ENTORNO=...
+ENV APP_ENTORNO=local
+
+# La imagen oficial procesa /etc/nginx/templates/*.template con envsubst al arrancar
+# y deja el resultado en /etc/nginx/conf.d/. Asi la misma imagen sirve para todos los entornos.
+COPY default.conf.template /etc/nginx/templates/default.conf.template
+
+# Sitio estatico de la tienda
 COPY ./html /usr/share/nginx/html
 
-# Exponer el puerto en el que Nginx está escuchando
 EXPOSE 80

@@ -1,0 +1,86 @@
+# Plantilla de despliegue reutilizada por cada entorno (desarrollo y produccion).
+# Corre en el agente de la VM registrada en el Environment de Azure DevOps.
+parameters:
+- name: entorno
+  type: string
+- name: puerto
+  type: number
+  default: 80
+
+jobs:
+- deployment: Desplegar
+  displayName: 'Desplegar en ${{ parameters.entorno }}'
+  environment:
+    name: ${{ parameters.entorno }}
+    resourceType: VirtualMachine
+  variables:
+    CONTENEDOR: 'tienda-web'
+    IMAGEN: '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)'
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+        - download: none
+
+        - script: |
+            if ! command -v docker > /dev/null; then
+              echo "Docker no esta instalado. Instalando..."
+              export DEBIAN_FRONTEND=noninteractive
+              sudo apt-get update -q
+              sudo apt-get install -y -q ca-certificates curl gnupg
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update -q
+              sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io
+              sudo systemctl enable --now docker
+            fi
+            sudo docker --version
+          displayName: 'Verificar Docker en la VM'
+
+        - script: |
+            set -e
+            echo "$ACR_PASSWORD" | sudo docker login $(ACR_LOGIN_SERVER) -u $(ACR_USERNAME) --password-stdin
+            sudo docker pull $(IMAGEN)
+
+            # Se guarda la imagen que estaba corriendo para poder volver atras si la prueba falla
+            ANTERIOR=$(sudo docker inspect --format '{{.Config.Image}}' $(CONTENEDOR) 2>/dev/null || true)
+            echo "Imagen anterior: ${ANTERIOR:-ninguna}"
+            echo "##vso[task.setvariable variable=IMAGEN_ANTERIOR]$ANTERIOR"
+
+            sudo docker rm -f $(CONTENEDOR) 2>/dev/null || true
+            sudo docker run -d --name $(CONTENEDOR) --restart unless-stopped \
+              -p ${{ parameters.puerto }}:80 \
+              -e APP_ENTORNO=${{ parameters.entorno }} \
+              $(IMAGEN)
+            sudo docker logout $(ACR_LOGIN_SERVER)
+          displayName: 'Descargar imagen de ACR y levantar contenedor'
+          env:
+            ACR_PASSWORD: $(ACR_PASSWORD)
+
+        - script: |
+            ESPERADO='"version":"$(Build.BuildNumber)","entorno":"${{ parameters.entorno }}"'
+            for i in $(seq 1 10); do
+              RESPUESTA=$(curl -fsS http://localhost:${{ parameters.puerto }}/estado || true)
+              if echo "$RESPUESTA" | grep -q "$ESPERADO"; then
+                echo "Prueba de humo OK: $RESPUESTA"
+                sudo docker ps --filter name=$(CONTENEDOR)
+                exit 0
+              fi
+              echo "Intento $i sin respuesta valida, reintentando..."
+              sleep 3
+            done
+
+            echo "##vso[task.logissue type=error]La prueba de humo fallo en ${{ parameters.entorno }}"
+            if [ -n "${IMAGEN_ANTERIOR}" ]; then
+              echo "Volviendo a la imagen anterior: ${IMAGEN_ANTERIOR}"
+              sudo docker rm -f $(CONTENEDOR)
+              sudo docker run -d --name $(CONTENEDOR) --restart unless-stopped \
+                -p ${{ parameters.puerto }}:80 -e APP_ENTORNO=${{ parameters.entorno }} ${IMAGEN_ANTERIOR}
+            fi
+            exit 1
+          displayName: 'Prueba de humo en ${{ parameters.entorno }}'
+
+        - script: sudo docker image prune -af --filter "until=72h"
+          displayName: 'Limpiar imagenes antiguas'
+          condition: succeeded()

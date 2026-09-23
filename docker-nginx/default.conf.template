@@ -1,0 +1,26 @@
+server {
+    listen 80;
+    server_name localhost;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Cabeceras para identificar la version desplegada en cada entorno
+    add_header X-App-Version "${APP_VERSION}" always;
+    add_header X-App-Entorno "${APP_ENTORNO}" always;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Endpoint que usan las pruebas de humo del pipeline
+    location = /estado {
+        default_type application/json;
+        return 200 '{"app":"tienda-grupo08","version":"${APP_VERSION}","entorno":"${APP_ENTORNO}"}';
+    }
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+}

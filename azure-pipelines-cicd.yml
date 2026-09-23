@@ -1,0 +1,85 @@
+# Pipeline CI/CD de la tienda (Grupo 08, Semana 7).
+# Cada cambio en docker-nginx/ que llega a master construye la imagen, la prueba,
+# la publica en ACR y la despliega primero en desarrollo y despues en produccion.
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - docker-nginx/*
+      - plantillas/*
+      - azure-pipelines-cicd.yml
+
+pr: none
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+variables:
+  ACR_SERVICE_CONNECTION: 'acr-grupo-08'
+  ACR_LOGIN_SERVER: 'acrdevopsgrupo08.azurecr.io'
+  ACR_USERNAME: 'acrdevopsgrupo08'
+  IMAGE_NAME: 'tienda-web'
+  # ACR_PASSWORD es una variable secreta del pipeline (no va en el repositorio)
+
+stages:
+- stage: CI
+  displayName: 'CI - Construir, probar y publicar'
+  jobs:
+  - job: Build
+    displayName: 'Build y prueba de la imagen'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: Docker@2
+      displayName: 'Construir imagen'
+      inputs:
+        command: build
+        containerRegistry: $(ACR_SERVICE_CONNECTION)
+        repository: $(IMAGE_NAME)
+        Dockerfile: docker-nginx/Dockerfile
+        buildContext: docker-nginx
+        arguments: '--build-arg APP_VERSION=$(Build.BuildNumber)'
+        tags: |
+          $(Build.BuildId)
+          latest
+
+    - script: |
+        set -e
+        IMAGEN=$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
+        docker run --rm $IMAGEN nginx -t
+        docker run -d --name prueba -p 8080:80 -e APP_ENTORNO=ci $IMAGEN
+        sleep 3
+        curl -fsS http://localhost:8080/ | grep -q "Tienda en linea - Grupo 08"
+        curl -fsS http://localhost:8080/estado | tee estado.json
+        grep -q '"version":"$(Build.BuildNumber)"' estado.json
+        echo
+        echo "Pruebas de la imagen OK"
+        docker rm -f prueba
+      displayName: 'Probar contenedor en el agente'
+
+    - task: Docker@2
+      displayName: 'Publicar imagen en ACR'
+      inputs:
+        command: push
+        containerRegistry: $(ACR_SERVICE_CONNECTION)
+        repository: $(IMAGE_NAME)
+        tags: |
+          $(Build.BuildId)
+          latest
+
+- stage: CD_Desarrollo
+  displayName: 'CD - Desarrollo'
+  dependsOn: CI
+  jobs:
+  - template: plantillas/deploy-vm.yml
+    parameters:
+      entorno: desarrollo
+
+- stage: CD_Produccion
+  displayName: 'CD - Produccion'
+  dependsOn: CD_Desarrollo
+  jobs:
+  - template: plantillas/deploy-vm.yml
+    parameters:
+      entorno: produccion

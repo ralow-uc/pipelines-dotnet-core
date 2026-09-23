@@ -1,5 +1,4 @@
-trigger:
-- master
+trigger: none  # desde la Semana 7 la infraestructura se crea con azure-pipeline-vm.yml
 
 pool:
   vmImage: 'ubuntu-latest'
