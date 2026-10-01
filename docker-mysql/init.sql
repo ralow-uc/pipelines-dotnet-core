@@ -10,7 +10,7 @@ CREATE TABLE productos (
     CONSTRAINT chk_stock CHECK (stock >= 0)
 );
 
-CREATE TABLE clientes (
+CREAT TABLE clientes (
     id INT AUTO_INCREMENT PRIMARY KEY,
     nombre VARCHAR(80) NOT NULL,
     email VARCHAR(80) NOT NULL UNIQUE,
