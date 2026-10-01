@@ -1,0 +1,90 @@
+# Plantilla de despliegue de la base de datos, igual para desarrollo y produccion.
+# Corre en el agente de la VM registrada en el Environment de Azure DevOps.
+parameters:
+- name: entorno
+  type: string
+
+jobs:
+- deployment: Desplegar
+  displayName: 'Desplegar MySQL en ${{ parameters.entorno }}'
+  environment:
+    name: ${{ parameters.entorno }}
+    resourceType: VirtualMachine
+  variables:
+    CONTENEDOR: 'tienda-bd'
+    VOLUMEN: 'tienda-bd-datos'
+    IMAGEN: '$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)'
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+        - download: none
+
+        - script: |
+            set -e
+            echo "$ACR_PASSWORD" | sudo docker login $(ACR_LOGIN_SERVER) -u $(ACR_USERNAME) --password-stdin
+            sudo docker pull $(IMAGEN)
+
+            # Se guarda la imagen que corria antes para poder volver si la prueba falla
+            ANTERIOR=$(sudo docker inspect --format '{{.Config.Image}}' $(CONTENEDOR) 2>/dev/null || true)
+            echo "Imagen anterior: ${ANTERIOR:-ninguna}"
+            echo "##vso[task.setvariable variable=IMAGEN_ANTERIOR]$ANTERIOR"
+
+            # Se reemplaza el contenedor pero el volumen se queda, asi los datos sobreviven al despliegue.
+            # Las contrasenas pasan por variables de entorno (-E y -e sin valor) para que no queden
+            # escritas en la linea de comandos.
+            sudo docker rm -f $(CONTENEDOR) 2>/dev/null || true
+            sudo -E docker run -d --name $(CONTENEDOR) --restart unless-stopped \
+              -p 127.0.0.1:3306:3306 \
+              -v $(VOLUMEN):/var/lib/mysql \
+              -e MYSQL_ROOT_PASSWORD -e MYSQL_PASSWORD \
+              -e MYSQL_DATABASE=$(MYSQL_DATABASE) -e MYSQL_USER=$(MYSQL_USER) \
+              $(IMAGEN)
+            sudo docker logout $(ACR_LOGIN_SERVER)
+          displayName: 'Descargar imagen de ACR y levantar MySQL'
+          env:
+            ACR_PASSWORD: $(ACR_PASSWORD)
+            MYSQL_ROOT_PASSWORD: $(MYSQL_ROOT_PASSWORD)
+            MYSQL_PASSWORD: $(MYSQL_PASSWORD)
+
+        - script: |
+            # Primer arranque con volumen vacio: MySQL tarda en correr init.sql
+            LISTO=no
+            for i in $(seq 1 40); do
+              if sudo docker logs $(CONTENEDOR) 2>&1 | grep -q 'ready for connections.*port: 3306'; then LISTO=si; break; fi
+              echo "Intento $i, MySQL todavia no escucha en el 3306..."
+              sleep 5
+            done
+
+            export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"
+            SQL="sudo -E docker exec -e MYSQL_PWD $(CONTENEDOR) mysql -uroot -N -B $(MYSQL_DATABASE) -e"
+            if [ "$LISTO" = si ] \
+               && [ "$($SQL 'SELECT COUNT(*) FROM productos')" -ge 8 ] \
+               && $SQL "INSERT INTO registro_despliegues (version, entorno) VALUES ('$(Build.BuildNumber)', '${{ parameters.entorno }}')"; then
+              echo "Prueba de humo OK en ${{ parameters.entorno }}"
+              $SQL "SELECT VERSION()"
+              $SQL "SELECT COUNT(*) AS productos FROM productos"
+              $SQL "SELECT id, version, entorno, fecha FROM registro_despliegues ORDER BY id DESC LIMIT 5"
+              sudo docker ps --filter name=$(CONTENEDOR) --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+              exit 0
+            fi
+
+            echo "##vso[task.logissue type=error]La prueba de humo fallo en ${{ parameters.entorno }}"
+            sudo docker logs --tail 30 $(CONTENEDOR) 2>&1 || true
+            if [ -n "${IMAGEN_ANTERIOR}" ]; then
+              echo "Volviendo a la imagen anterior: ${IMAGEN_ANTERIOR}"
+              sudo docker rm -f $(CONTENEDOR)
+              sudo -E docker run -d --name $(CONTENEDOR) --restart unless-stopped \
+                -p 127.0.0.1:3306:3306 -v $(VOLUMEN):/var/lib/mysql \
+                -e MYSQL_ROOT_PASSWORD -e MYSQL_PASSWORD \
+                -e MYSQL_DATABASE=$(MYSQL_DATABASE) -e MYSQL_USER=$(MYSQL_USER) ${IMAGEN_ANTERIOR}
+            fi
+            exit 1
+          displayName: 'Prueba de humo en ${{ parameters.entorno }}'
+          env:
+            MYSQL_ROOT_PASSWORD: $(MYSQL_ROOT_PASSWORD)
+            MYSQL_PASSWORD: $(MYSQL_PASSWORD)
+
+        - script: sudo docker image prune -af --filter "until=72h"
+          displayName: 'Limpiar imagenes antiguas'
+          condition: succeeded()

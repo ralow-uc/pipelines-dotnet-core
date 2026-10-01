@@ -1,0 +1,118 @@
+# Pipeline CI/CD de la base de datos de la tienda.
+# Un cambio en docker-mysql/ que llega a master construye la imagen de MySQL, valida el esquema
+# contra un MySQL real, la publica en ACR y la despliega en desarrollo y despues en produccion.
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - docker-mysql/*
+      - plantillas-bd/*
+      - azure-pipelines-bd.yml
+
+pr: none
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+variables:
+  ACR_SERVICE_CONNECTION: 'acr-grupo-08'
+  ACR_LOGIN_SERVER: 'acrdevopsgrupo08.azurecr.io'
+  ACR_USERNAME: 'acrdevopsgrupo08'
+  IMAGE_NAME: 'tienda-bd'
+  MYSQL_DATABASE: 'tienda'
+  MYSQL_USER: 'tienda_app'
+  # Variables secretas del pipeline (no estan en el repositorio): ACR_PASSWORD,
+  # MYSQL_ROOT_PASSWORD y MYSQL_PASSWORD
+
+stages:
+- stage: CI
+  displayName: 'CI - Construir, probar y publicar'
+  jobs:
+  - job: Build
+    displayName: 'Build y prueba de la imagen'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: Docker@2
+      displayName: 'Construir imagen'
+      inputs:
+        command: build
+        containerRegistry: $(ACR_SERVICE_CONNECTION)
+        repository: $(IMAGE_NAME)
+        Dockerfile: docker-mysql/Dockerfile
+        buildContext: docker-mysql
+        arguments: '--label org.opencontainers.image.version=$(Build.BuildNumber) --label org.opencontainers.image.revision=$(Build.SourceVersion)'
+        tags: |
+          $(Build.BuildId)
+          latest
+
+    - script: |
+        set -e
+        IMAGEN=$(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
+
+        # Una imagen con contrasenas dentro no debe llegar al registro
+        if docker inspect --format '{{json .Config.Env}}' $IMAGEN | grep -q 'PASSWORD'; then
+          echo "##vso[task.logissue type=error]La imagen trae contrasenas en sus variables de entorno"
+          exit 1
+        fi
+        echo "La imagen no trae contrasenas"
+
+        # Contrasenas descartables, solo para esta prueba
+        ROOT=$(openssl rand -hex 12)
+        docker run -d --name prueba-bd \
+          -e MYSQL_ROOT_PASSWORD=$ROOT -e MYSQL_DATABASE=$(MYSQL_DATABASE) \
+          -e MYSQL_USER=$(MYSQL_USER) -e MYSQL_PASSWORD=$(openssl rand -hex 12) $IMAGEN
+
+        # El MySQL temporal del arranque tambien dice "ready for connections", pero con port: 0.
+        # El definitivo escucha en el 3306.
+        for i in $(seq 1 40); do
+          if docker logs prueba-bd 2>&1 | grep -q 'ready for connections.*port: 3306'; then break; fi
+          sleep 3
+        done
+        docker logs prueba-bd 2>&1 | tail -5
+
+        SQL="docker exec -e MYSQL_PWD=$ROOT prueba-bd mysql -uroot -N -B $(MYSQL_DATABASE) -e"
+        TABLAS=$($SQL "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$(MYSQL_DATABASE)'")
+        PRODUCTOS=$($SQL "SELECT COUNT(*) FROM productos")
+        PEDIDOS=$($SQL "SELECT COUNT(*) FROM pedidos p JOIN clientes c ON c.id=p.cliente_id JOIN productos pr ON pr.id=p.producto_id")
+        echo "tablas=$TABLAS productos=$PRODUCTOS pedidos=$PEDIDOS"
+        if [ "$TABLAS" != "4" ] || [ "$PRODUCTOS" -lt 8 ] || [ "$PEDIDOS" -lt 4 ]; then
+          echo "##vso[task.logissue type=error]El esquema no quedo como se esperaba"
+          exit 1
+        fi
+
+        # Las restricciones del esquema tienen que rechazar datos malos
+        if $SQL "INSERT INTO productos (nombre, categoria, precio, stock) VALUES ('malo','x',-5,1)" 2>/dev/null; then
+          echo "##vso[task.logissue type=error]El esquema acepto un precio negativo"
+          exit 1
+        fi
+        echo "Pruebas de la imagen OK"
+        docker rm -f prueba-bd
+      displayName: 'Probar esquema en un MySQL real'
+
+    - task: Docker@2
+      displayName: 'Publicar imagen en ACR'
+      inputs:
+        command: push
+        containerRegistry: $(ACR_SERVICE_CONNECTION)
+        repository: $(IMAGE_NAME)
+        tags: |
+          $(Build.BuildId)
+          latest
+
+- stage: CD_Desarrollo
+  displayName: 'CD - Desarrollo'
+  dependsOn: CI
+  jobs:
+  - template: plantillas-bd/deploy-bd.yml
+    parameters:
+      entorno: desarrollo
+
+- stage: CD_Produccion
+  displayName: 'CD - Produccion'
+  dependsOn: CD_Desarrollo
+  jobs:
+  - template: plantillas-bd/deploy-bd.yml
+    parameters:
+      entorno: produccion
